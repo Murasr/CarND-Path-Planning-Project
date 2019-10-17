@@ -18,52 +18,28 @@ using std::vector;
 double horizon_front = 50;
 
 //! Current vehicle velocity in mph
-double cur_vel = 1.0;
+double ref_vel = 1.0;
 
-//! Method which detects whether a collision is possible at N timestamps ahead
-//! @param - f_lane - Target lane
-//! @param - car_s - S position of car
-//! @param - sensor_fusion - Sensor Fusion Data of all objects
-//! @param - num_timestamps_ahead - Number of timestamps ahead to consider for detecting collision
-bool predictCollision(int f_lane, double car_s, vector<vector<double>> sensor_fusion, int num_timestamps_ahead, 
-                      vector<double>& map_waypoints_x, vector<double>& map_waypoints_y)
+bool isCollision(int f_lane, double car_s, vector<vector<double>> sensor_fusion, int previousPathSize)
 {
   bool isCollidable = false;
   
   for(int i=0; i<sensor_fusion.size(); i++)
   {
     double d = sensor_fusion[i][6];
-    
-    double x = sensor_fusion[i][1];
-    double y = sensor_fusion[i][2];
-    
-    double x_vel = sensor_fusion[i][3];
-    double y_vel = sensor_fusion[i][4];
-    
-    double x_future = x + num_timestamps_ahead * 0.02 * x_vel;
-    double y_future = y + num_timestamps_ahead * 0.02 * y_vel;
-    double yaw = atan2(y_future - y, x_future - x);
-    
-    vector<double> other_vehicle_frenet = getFrenet(x_future, y_future, yaw, map_waypoints_x, map_waypoints_y);
 
     double ego_d = f_lane*4 + 2;
-    double ego_d_future = other_vehicle_frenet[1]; //f_lane*4 + 2;
 
-    //! Consider only vehicles within the target lane
-    if( ((d > (ego_d - 2)) && (d < (ego_d + 2))) /*|| ((d > (ego_d_future - 2)) && (d < (ego_d_future + 2)))*/ )
+    if( (d > (ego_d - 2)) && (d < (ego_d + 2)) )
     {
       double vx = sensor_fusion[i][3];
       double vy = sensor_fusion[i][4];
       double veh_speed = sqrt(vx * vx + vy * vy);
 
       double s = sensor_fusion[i][5];
-      s += num_timestamps_ahead * 0.02 * veh_speed;
-      
-      double s_present = sensor_fusion[i][5];
-      double s_future = s;//other_vehicle_frenet[0];
+      s += previousPathSize * 0.02 * veh_speed;
 
-      //! Detect collision only if the target is in front of ego vehicle and distance is less than the horizon limit
-      if( (s_future > car_s) && ((s_future - car_s) < horizon_front) )
+      if( (s > car_s) && (s - car_s) < horizon_front )
       {
         isCollidable = true;
         break;
@@ -71,27 +47,22 @@ bool predictCollision(int f_lane, double car_s, vector<vector<double>> sensor_fu
     }
   }
   
+  
   return isCollidable;
 }
 
-
-//! Method which generates the trajectory given car position and target lane
-//! @param - car_s - S position of car
-//! @param - f_lane - Target lane
-//! @param - map_waypoints_s, map_waypoints_x, map_waypoints_y - For conversion from Frenet to XY coordinates
-//! @param - spline_xs, spline_ys - Trailing (older) points in the spline for smoother transition
-//! @param - previous_path_x, previous_path_y - List of previous X and previous Y points to be prefixed to the trajectory
-//! @param - f_traj - [out] - The output trajectory
-void generateTrajectory(double car_s, int f_lane, 
-                        vector<double>& map_waypoints_s, vector<double>& map_waypoints_x, vector<double>& map_waypoints_y, 
-                        vector<double> spline_xs, vector<double> spline_ys, 
-                        vector<double>& previous_path_x, vector<double>& previous_path_y, 
-                        STrajectory& f_traj)
+struct STrajectory
 {
-   //! Horizon of 3*horizon_front metres
+  vector<double> next_x_vals;
+  vector<double> next_y_vals;
+};
+
+void generateTrajectory(double car_s, int f_lane, vector<double>& map_waypoints_s, vector<double>& map_waypoints_x, vector<double>& map_waypoints_y, vector<double> spline_xs, vector<double> spline_ys, vector<double>& previous_path_x, vector<double>& previous_path_y, STrajectory& f_traj)
+{
+   //! Horizon of 150 metres
   vector<double> wp1 = getXY(car_s + horizon_front, (f_lane*4)+2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-  vector<double> wp2 = getXY(car_s + horizon_front*1.5, (f_lane*4)+2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-  vector<double> wp3 = getXY(car_s + horizon_front*2, (f_lane*4)+2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+  vector<double> wp2 = getXY(car_s + horizon_front*2, (f_lane*4)+2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+  vector<double> wp3 = getXY(car_s + horizon_front*3, (f_lane*4)+2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
   spline_xs.push_back(wp1[0]);
   spline_xs.push_back(wp2[0]);
@@ -105,7 +76,6 @@ void generateTrajectory(double car_s, int f_lane,
   double ref_y = spline_ys[1];
   double ref_yaw = atan2(ref_y - spline_ys[0], ref_x - spline_xs[0]);
 
-  //! Do the translation and rotation to transform the origin
   for(int count = 0; count < spline_xs.size(); count++)
   {
     double trans_x = spline_xs[count] - ref_x;
@@ -115,7 +85,6 @@ void generateTrajectory(double car_s, int f_lane,
     spline_ys[count] = trans_x * sin(-ref_yaw) + trans_y * cos(-ref_yaw);
   }
 
-  //! store the previous paths
   for(int count = 0; count < previous_path_x.size(); count++)
   {
     f_traj.next_x_vals.push_back(previous_path_x[count]);
@@ -130,11 +99,9 @@ void generateTrajectory(double car_s, int f_lane,
   double y = s(x);
   double dist = distance(x, y, 0, 0);
 
-  //2.237 is the factor to convert mph to m/s
-  double N = dist/(0.02 * cur_vel / 2.237);
+  double N = dist/(0.02 * ref_vel / 2.237);
   double x_step = x/N;
 
-  //! Calculate the remaining points and append to trajectory
   for(int count = 1; count <= 50 - previous_path_x.size(); count++)
   {
     double x_val = x_step*count;
@@ -185,11 +152,11 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
   
-  int cur_lane = 1;
+  int lane = 1;
 
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy, &cur_lane, &cur_vel]
+               &map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -231,31 +198,23 @@ int main() {
 
           json msgJson;
 
-          //! Store the last point as the current point
+          
           if(previousPathSize > 0)
             car_s = end_path_s;
           
-          //! by default, speed should be increased.
           bool increase_speed = true;
-          
-          //! Predict collision if any 
-          bool isCollisionExpected = predictCollision(cur_lane, car_s, sensor_fusion, previousPathSize, map_waypoints_x, map_waypoints_y);
-          
-          //! Do not increase speed in case of collision
+          bool isCollisionExpected = isCollision(lane, car_s, sensor_fusion, previousPathSize);
           increase_speed = !isCollisionExpected;
           
-          //! Increase speed only within the speed limit 
-          if(increase_speed && cur_vel < 48)
+          if(increase_speed && ref_vel < 45)
           {
-            cur_vel += cur_vel * 0.030;
+            ref_vel += ref_vel * 0.025;
           }
-          //! Decrease speed until the minimum speed limit
-          else if(!increase_speed && cur_vel > 20)
+          else if(!increase_speed && ref_vel > 20)
           {
-            cur_vel -= cur_vel * 0.030;
+            ref_vel -= ref_vel * 0.025;
           }
 
-          //! Build path planning points using spline
           vector<double> spline_xs;
           vector<double> spline_ys;
           
@@ -281,22 +240,16 @@ int main() {
             spline_ys.push_back(previous_path_y[previousPathSize-1]);
           }
           
-          //! If the velocity is less than 35 and collision is expected, try to change lanes
-          //! The limit of 35 is given so that the vehicle slows down before changing lanes
-          if(cur_vel < 35 && isCollisionExpected)
+          if(ref_vel < 35 && isCollisionExpected)
           {
-            switch(cur_lane)
+            switch(lane)
             {
                case 0:
                 {
-                  //! If current lane is 0, the new lane would be 1.
                   int new_lane = 1;
-                  
-                  //! Generate the trajectory for the lane change
                   STrajectory lane_change_traj_r;
                   generateTrajectory(car_s, new_lane, map_waypoints_s, map_waypoints_x, map_waypoints_y, spline_xs, spline_ys, previous_path_x, previous_path_y, lane_change_traj_r);
         
-                  //! Predict collisions during lane change - This is done by predicting collision at the end point and mid point of the trajectory
                   int size = lane_change_traj_r.next_x_vals.size();
                   if(size/2 > 1)
                   {
@@ -308,7 +261,7 @@ int main() {
                       double yaw = atan2(y1 - y2,  x1 - x2);
                     
                       vector<double> new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                      bool isCollisionEndPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y);
+                      bool isCollisionEndPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size);
  
                       //! collision at midpoint
                       y1 = lane_change_traj_r.next_y_vals[size/2-1];
@@ -318,25 +271,21 @@ int main() {
                       yaw = atan2(y1 - y2,  x1 - x2);
                     
                       new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                      bool isCollisionMidPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y); 
+                      bool isCollisionMidPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size); 
                     
-                      //! Do lane change only if no collision is predicted
                       if(!isCollisionEndPoint && !isCollisionMidPoint)
-                        cur_lane = new_lane;
+                        lane = new_lane;
                   }
                   break;
                 }
               case 1:
                 {
-                  //! If current lane is 1, new lane would be 0 for left lane change
                   int new_lane = 0;
                   
                   {
-                    //! Generate the trajectory for the lane change
                     STrajectory lane_change_traj;
                     generateTrajectory(car_s, new_lane, map_waypoints_s, map_waypoints_x, map_waypoints_y, spline_xs, spline_ys, previous_path_x, previous_path_y, lane_change_traj);
 
-                    //! Predict collisions during lane change - This is done by predicting collision at the end point and mid point of the trajectory
                     int size = lane_change_traj.next_x_vals.size();
                     if(size/2 > 1)
                     {
@@ -348,7 +297,7 @@ int main() {
                         double yaw = atan2(y1 - y2,  x1 - x2);
 
                         vector<double> new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                        bool isCollisionEndPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y);
+                        bool isCollisionEndPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size);
 
                         //! collision at midpoint
                         y1 = lane_change_traj.next_y_vals[size/2-1];
@@ -358,11 +307,10 @@ int main() {
                         yaw = atan2(y1 - y2,  x1 - x2);
 
                         new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                        bool isCollisionMidPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y); 
+                        bool isCollisionMidPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size); 
 
-                        //! Do lane change only if no collision is predicted
                         if(!isCollisionEndPoint && !isCollisionMidPoint)
-                          cur_lane = new_lane;
+                          lane = new_lane;
 
                         //double yaw = atan2(lane_change_traj.next_y_vals[size-1] - lane_change_traj.next_y_vals[size-2], lane_change_traj.next_x_vals[size-1] - lane_change_traj.next_x_vals[size-2]);
                         //vector<double> new_car_frenet = getFrenet(lane_change_traj.next_x_vals[size-1], lane_change_traj.next_y_vals[size-1], yaw, map_waypoints_x, map_waypoints_y);
@@ -371,17 +319,12 @@ int main() {
                     }
                   }
 
-                  //! If left lane change is not possible, then check for right lane change
-                  if(cur_lane != new_lane)
+                  if(lane != new_lane)
                   {
-                    //! If current lane is 1, new lane would be 2 for right lane change
                     new_lane = 2;
-                    
-                    //! Generate the trajectory for the lane change
                     STrajectory lane_change_traj;
                     generateTrajectory(car_s, new_lane, map_waypoints_s, map_waypoints_x, map_waypoints_y, spline_xs, spline_ys, previous_path_x, previous_path_y, lane_change_traj);
 
-                    //! Predict collisions during lane change - This is done by predicting collision at the end point and mid point of the trajectory
                     int size = lane_change_traj.next_x_vals.size();
                     if(size/2 > 1)
                     {
@@ -393,7 +336,7 @@ int main() {
                         double yaw = atan2(y1 - y2,  x1 - x2);
 
                         vector<double> new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                        bool isCollisionEndPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y);
+                        bool isCollisionEndPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size);
 
                         //! collision at midpoint
                         y1 = lane_change_traj.next_y_vals[size/2-1];
@@ -403,11 +346,10 @@ int main() {
                         yaw = atan2(y1 - y2,  x1 - x2);
 
                         new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                        bool isCollisionMidPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y); 
+                        bool isCollisionMidPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size); 
 
-                        //! Do lane change only if no collision is predicted
                         if(!isCollisionEndPoint && !isCollisionMidPoint)
-                          cur_lane = new_lane;
+                          lane = new_lane;
 
                         //double yaw = atan2(lane_change_traj.next_y_vals[size-1] - lane_change_traj.next_y_vals[size-2], lane_change_traj.next_x_vals[size-1] - lane_change_traj.next_x_vals[size-2]);
                         //vector<double> new_car_frenet = getFrenet(lane_change_traj.next_x_vals[size-1], lane_change_traj.next_y_vals[size-1], yaw, map_waypoints_x, map_waypoints_y);
@@ -431,14 +373,10 @@ int main() {
                 }
                 case 2:
                 {
-                  //! If current lane is 2, new lane would be 1 for lane change
                   int new_lane = 1;
-                  
-                  //! Generate the trajectory for the lane change
                   STrajectory lane_change_traj_l;
                   generateTrajectory(car_s, new_lane, map_waypoints_s, map_waypoints_x, map_waypoints_y, spline_xs, spline_ys, previous_path_x, previous_path_y, lane_change_traj_l);
 
-                  //! Predict collisions during lane change - This is done by predicting collision at the end point and mid point of the trajectory
                   int size = lane_change_traj_l.next_x_vals.size();
                   if(size/2 > 1)
                   {
@@ -450,7 +388,7 @@ int main() {
                       double yaw = atan2(y1 - y2,  x1 - x2);
                     
                       vector<double> new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                      bool isCollisionEndPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y);
+                      bool isCollisionEndPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size);
  
                       //! collision at midpoint
                       y1 = lane_change_traj_l.next_y_vals[size/2-1];
@@ -460,11 +398,10 @@ int main() {
                       yaw = atan2(y1 - y2,  x1 - x2);
                     
                       new_car_frenet = getFrenet(x1, y1, yaw, map_waypoints_x, map_waypoints_y);
-                      bool isCollisionMidPoint = predictCollision(new_lane, new_car_frenet[0], sensor_fusion, size, map_waypoints_x, map_waypoints_y); 
+                      bool isCollisionMidPoint = isCollision(new_lane, new_car_frenet[0], sensor_fusion, size); 
                     
-                      //! Do lane change only if no collision is predicted
                       if(!isCollisionEndPoint && !isCollisionMidPoint)
-                        cur_lane = new_lane;
+                        lane = new_lane;
                      
                       //double yaw = atan2(lane_change_traj_l.next_y_vals[size-1] - lane_change_traj_l.next_y_vals[size-2], lane_change_traj_l.next_x_vals[size-1] - lane_change_traj_l.next_x_vals[size-2]);
                       //vector<double> new_car_frenet = getFrenet(lane_change_traj_l.next_x_vals[size-1], lane_change_traj_l.next_y_vals[size-1], yaw, map_waypoints_x, map_waypoints_y);
@@ -476,9 +413,8 @@ int main() {
             }
           }
           
-          //! Generate the trajectory for the new target lane
           STrajectory traj;
-          generateTrajectory(car_s, cur_lane, map_waypoints_s, map_waypoints_x, map_waypoints_y, spline_xs, spline_ys, previous_path_x, previous_path_y, traj);
+          generateTrajectory(car_s, lane, map_waypoints_s, map_waypoints_x, map_waypoints_y, spline_xs, spline_ys, previous_path_x, previous_path_y, traj);
 
           /**
            * TODO: define a path made up of (x,y) points that the car will visit
@@ -496,7 +432,6 @@ int main() {
           }*/
 
 
-          //! Send the trajectory to the output
           msgJson["next_x"] = traj.next_x_vals;
           msgJson["next_y"] = traj.next_y_vals;
 

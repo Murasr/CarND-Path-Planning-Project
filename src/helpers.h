@@ -9,6 +9,15 @@
 using std::string;
 using std::vector;
 
+//! Structure to denote the trajectory
+struct STrajectory
+{
+  //! Vector of X points
+  vector<double> next_x_vals;
+  //! Vector of Y points
+  vector<double> next_y_vals;
+};
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 //   else the empty string "" will be returned.
